@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DEV_NAME='ELAN0732:00 04F3:2650'
+DEVICES=('ELAN0732:00 04F3:2650')
 
 case "$1" in
 'normal')
@@ -36,4 +36,7 @@ case "$1" in
     exit 1
 esac
 
-xinput set-prop "${DEV_NAME}" 'Coordinate Transformation Matrix' "${mat[@]}"
+for dev in "${DEVICES[@]}"; do
+    xinput set-prop "${dev}" 'Coordinate Transformation Matrix' "${mat[@]}"
+done
+
