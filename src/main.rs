@@ -1,58 +1,98 @@
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::process::Command;
+#![feature(never_type)]
 
-use dbus::*;
-use dbus::arg::{RefArg, Variant};
+use std::sync::{Arc, RwLock};
 
-use sensorproxy::OrgFreedesktopDBusPropertiesPropertiesChanged as PropertiesChanged;
-
+mod dispatcher;
+mod rotation_handler;
 mod sensorproxy;
+mod tray;
 
 const CONF_PATH: &str = "./conf.d/rotation";
 
 fn main() {
-  let c = Connection::get_private(BusType::System).unwrap();
-  let p = c.with_path("net.hadess.SensorProxy", "/net/hadess/SensorProxy", 5000);
-  use sensorproxy::NetHadessSensorProxy;
-  let has_accel = p.get_has_accelerometer().unwrap();
-  println!("Has acceleration sensor: {}", has_accel);
-  if has_accel {
-    p.claim_accelerometer().unwrap();
-    c.add_match(&PropertiesChanged::match_str(Some(&"net.hadess.SensorProxy".into()), None)).unwrap();
+  let state = Arc::new(RwLock::new(SystemState::default()));
+  let threads = vec![
+    tray::start(state.clone()),
+    rotation_handler::start(state.clone()),
+  ];
+  threads.into_iter().for_each(|t| { t.join().unwrap(); });
+}
 
-    // call scripts with initial value before listening to updates
-    on_rotation_update(&p.get_accelerometer_orientation().unwrap());
+#[derive(Default, Debug, Clone)]
+pub struct SystemState {
+  lock_orientation: bool,
+  orientation: Orientation,
+  actual_orientation: Orientation,
+}
 
-    loop {
-      for msg in c.incoming(1000) {
-        if let Some(a) = PropertiesChanged::from_message(&msg) as Option<PropertiesChanged> {
-          for (k, v) in a.changed_properties.iter() {
-            let v = v as &Variant<Box<dyn RefArg>>;
-            match k.as_str() {
-              "AccelerometerOrientation" => {
-                if let Some(ao) = v.as_str() {
-                  on_rotation_update(ao);
-                }
-              }
-              _ => {}
-            }
-          }
-        }
-      }
+impl SystemState {
+  pub fn set_actual_orientation(&mut self, o: Orientation) {
+    self.actual_orientation = o;
+    self.on_orientation_changed();
+  }
+
+  pub fn actual_orientation(&self) -> Orientation { self.actual_orientation }
+
+  pub fn set_orientation(&mut self, o: Orientation) {
+    self.lock_orientation = true;
+    self.orientation = o;
+    self.update_listeners();
+  }
+
+  pub fn set_lock_orientation(&mut self, b: bool) {
+    self.lock_orientation = b;
+    if !b { self.on_orientation_changed(); }
+  }
+
+  pub fn toggle_lock_orientation(&mut self) {
+    self.set_lock_orientation(!self.lock_orientation());
+  }
+
+  pub fn lock_orientation(&self) -> bool { self.lock_orientation }
+
+  fn on_orientation_changed(&mut self) {
+    if !self.lock_orientation && self.orientation != self.actual_orientation {
+      self.orientation = self.actual_orientation;
+      self.update_listeners();
+    }
+  }
+
+  pub fn update_listeners(&self) {
+    dispatcher::on_rotation_update(self.orientation.as_str());
+  }
+
+  // TODO save state?
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Orientation {
+  Normal,
+  LeftUp,
+  RightUp,
+  BottomUp,
+}
+
+impl Orientation {
+  fn from_str(s: &str) -> Orientation {
+    match s {
+      "normal" => Orientation::Normal,
+      "left-up" => Orientation::LeftUp,
+      "right-up" => Orientation::RightUp,
+      "bottom-up" => Orientation::BottomUp,
+      _ => unreachable!(),
+    }
+  }
+
+  fn as_str(&self) -> &'static str {
+    match self {
+      Orientation::Normal => "normal",
+      Orientation::LeftUp => "left-up",
+      Orientation::RightUp => "right-up",
+      Orientation::BottomUp => "bottom-up",
     }
   }
 }
 
-fn on_rotation_update(rotation: &str) {
-  for rd in fs::read_dir(CONF_PATH) {
-    rd.into_iter()
-      .filter_map(|e| e.ok())
-      .filter(|e| e.path().is_file() && e.metadata().unwrap().permissions().mode() & 0o111 != 0)
-      .for_each(|e| {
-        Command::new(e.path())
-          .arg(rotation)
-          .spawn().expect(&format!("Failed to exec {}", e.path().to_string_lossy()));
-      });
-  }
+impl Default for Orientation {
+  fn default() -> Self { Orientation::Normal }
 }
